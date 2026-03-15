@@ -1,0 +1,135 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.models.user import User
+from app.models.job import Job
+from app.utils.auth import get_current_user
+from app.services.match_score import calculate_match
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
+
+router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+class JobRequest(BaseModel):
+    company: str
+    role: str
+    job_description: Optional[str] = None
+    job_url: Optional[str] = None
+    salary_range: Optional[str] = None
+    location: Optional[str] = None
+    platform: Optional[str] = None
+    notes: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+
+class UpdateStatusRequest(BaseModel):
+    status: str  # wishlist/applied/screening/interview/offer/rejected
+
+@router.post("/")
+def add_job(
+    request: JobRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Calculate match score if job description provided
+    match_score = None
+    matched_skills = None
+    missing_skills = None
+
+    if request.job_description and current_user.skills:
+        match = calculate_match(current_user.skills, request.job_description)
+        match_score = match["match_score"]
+        matched_skills = match["matched_skills"]
+        missing_skills = match["missing_skills"]
+
+    # Create new job
+    new_job = Job(
+        user_id=current_user.id,
+        company=request.company,
+        role=request.role,
+        job_description=request.job_description,
+        job_url=request.job_url,
+        salary_range=request.salary_range,
+        location=request.location,
+        platform=request.platform,
+        notes=request.notes,
+        contact_name=request.contact_name,
+        contact_email=request.contact_email,
+        match_score=match_score,
+        matched_skills=matched_skills,
+        missing_skills=missing_skills,
+        status="wishlist"
+    )
+
+    db.add(new_job)
+    db.commit()
+    db.refresh(new_job)
+    return new_job
+
+@router.get("/")
+def get_jobs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    jobs = db.query(Job).filter(Job.user_id == current_user.id).all()
+    return jobs
+
+
+@router.get("/{job_id}")
+def get_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    job = db.query(Job).filter(Job.id == job_id).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    return job
+
+@router.put("/{job_id}/status")
+def update_status(
+    job_id: int,
+    request: UpdateStatusRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    job = db.query(Job).filter(Job.id == job_id).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    job.status = request.status
+
+    if request.status == "applied":
+        job.applied_date = datetime.utcnow()
+
+    db.commit()
+    db.refresh(job)
+    return job
+
+@router.delete("/{job_id}")
+def delete_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    job = db.query(Job).filter(Job.id == job_id).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    db.delete(job)
+    db.commit()
+    return {"message": "Job deleted successfully"}
